@@ -1,7 +1,7 @@
 # DEFINE ALL YOUR VARIABLES HERE
 
-instance_type = "t2.medium"
-ami           = "ami-0e86e20dae9224db8"   # Ubuntu 24.04
+instance_type = "c7i-flex.large"
+ami           = "ami-0b6d9d3d33ba97d99"   # Ubuntu 26.04
 key_name      = "key"                     # Replace with your key-name without .pem extension
 volume_size   = 30
 region_name   = "us-east-1"

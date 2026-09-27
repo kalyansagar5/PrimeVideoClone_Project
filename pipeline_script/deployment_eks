@@ -1,56 +1,315 @@
 pipeline {
     agent any
 
+    environment {
+        AWS_DEFAULT_REGION = 'us-east-1'
+        KUBECTL = '/usr/local/bin/kubectl'
+    }
+
     parameters {
-        string(name: 'AWS_REGION', defaultValue: 'us-east-1', description: 'Enter your AWS region')
-        string(name: 'AWS_ACCOUNT_ID', defaultValue: '123456789000', description: 'Enter your AWS account ID')
-        string(name: 'ECR_REPO_NAME', defaultValue: 'amazon-prime', description: 'Enter repository name')
-        string(name: 'VERSION', defaultValue: 'latest', description: 'Enter version number')
-        string(name: 'CLUSTER_NAME', defaultValue: 'devops-project-cluster', description: 'Enter your EKS cluster name')
+        string(
+            name: 'CLUSTER_NAME',
+            defaultValue: 'amazon-prime-cluster',
+            description: 'EKS cluster name'
+        )
+
+        string(
+            name: 'ECR_REPO_NAME',
+            defaultValue: 'amazon-prime',
+            description: 'ECR repository name'
+        )
+
+        string(
+            name: 'VERSION',
+            defaultValue: 'latest',
+            description: 'Docker image tag'
+        )
     }
 
     stages {
-        stage("Clone GitHub Repository") {
+
+        stage('Check Tools') {
             steps {
-                // Clone the repository containing deployment and service files
-                git branch: 'main', url: 'https://github.com/kalyansagar5/PrimeVideoClone_Project.git'
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "CHECKING TOOLS"
+                    echo "======================================"
+
+                    echo "AWS CLI:"
+                    aws --version
+
+                    echo ""
+                    echo "kubectl:"
+                    $KUBECTL version --client
+
+                    echo ""
+                    echo "Tools check completed."
+                '''
             }
         }
-		
-        stage("Login to EKS") {
+
+        stage('Clone GitHub Repository') {
             steps {
-                script {
-                    withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'),
-                                     string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
-                        // Update kubeconfig
-                        sh "aws eks --region ${params.AWS_REGION} update-kubeconfig --name ${params.CLUSTER_NAME}"
-                        
+                echo "======================================"
+                echo "CLONING GITHUB REPOSITORY"
+                echo "======================================"
+
+                git branch: 'main',
+                    url: 'https://github.com/kalyansagar5/PrimeVideoClone_Project.git'
+            }
+        }
+
+        stage('Login to EKS') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'access-key',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'secret-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        echo "======================================"
+                        echo "CONNECTING TO EKS"
+                        echo "======================================"
+
+                        aws eks update-kubeconfig \
+                            --region "$AWS_DEFAULT_REGION" \
+                            --name "$CLUSTER_NAME"
+
+                        echo ""
+                        echo "Current Kubernetes context:"
+                        $KUBECTL config current-context
+
+                        echo ""
+                        echo "EKS cluster status:"
+                        aws eks describe-cluster \
+                            --region "$AWS_DEFAULT_REGION" \
+                            --name "$CLUSTER_NAME" \
+                            --query "cluster.status" \
+                            --output text
+
+                        echo ""
+                        echo "EKS nodes:"
+                        $KUBECTL get nodes
+
+                        echo ""
+                        echo "EKS connection successful."
+                    '''
+                }
+            }
+        }
+
+        stage('Get AWS Account ID') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'access-key',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'secret-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    script {
+                        env.AWS_ACCOUNT_ID = sh(
+                            script: '''
+                                aws sts get-caller-identity \
+                                    --query Account \
+                                    --output text
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        echo "AWS Account ID: ${env.AWS_ACCOUNT_ID}"
                     }
                 }
             }
         }
 
-		
-      stage ("Select Image Version") {
+        stage('Prepare Deployment Image') {
             steps {
-                script {
-                        def ECR_IMAGE_NAME = "${params.AWS_ACCOUNT_ID}.dkr.ecr.${params.AWS_REGION}.amazonaws.com/${params.ECR_REPO_NAME}:${params.VERSION}"
-                        sh "sed -i 's|image: .*|image: ${ECR_IMAGE_NAME}|' k8s_files/deployment.yaml"
-                }	
-            }
-        }		
+                sh '''
+                    set -e
 
-        // ----------------------------------------------------
-	// USE THIS STAGE TO DEPLOY IMAGE AS PER THE VERSION NO
-        // ----------------------------------------------------
-        stage("Deploy to EKS") {
-            steps {
-                script {
-                        // Apply the deployment and service files
-                        sh "kubectl apply -f k8s_files/deployment.yaml"
-                        sh "kubectl apply -f k8s_files/service.yaml"
-                }
+                    echo "======================================"
+                    echo "PREPARING APPLICATION IMAGE"
+                    echo "======================================"
+
+                    ECR_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPO_NAME:$VERSION"
+
+                    echo "ECR Image:"
+                    echo "$ECR_IMAGE"
+
+                    if [ ! -f k8s_files/deployment.yaml ]; then
+                        echo "ERROR: k8s_files/deployment.yaml not found."
+                        exit 1
+                    fi
+
+                    if [ ! -f k8s_files/service.yaml ]; then
+                        echo "ERROR: k8s_files/service.yaml not found."
+                        exit 1
+                    fi
+
+                    # Create temporary deployment manifest.
+                    # Original deployment.yaml is NOT modified.
+                    sed "s|image:.*|image: $ECR_IMAGE|" \
+                        k8s_files/deployment.yaml \
+                        > k8s_files/deployment.generated.yaml
+
+                    echo ""
+                    echo "Image configured as:"
+                    grep "image:" k8s_files/deployment.generated.yaml
+                '''
             }
+        }
+
+        stage('Deploy Application') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "DEPLOYING APPLICATION TO EKS"
+                    echo "======================================"
+
+                    $KUBECTL apply \
+                        -f k8s_files/deployment.generated.yaml
+
+                    $KUBECTL apply \
+                        -f k8s_files/service.yaml
+
+                    echo ""
+                    echo "Kubernetes manifests applied successfully."
+                '''
+            }
+        }
+
+        stage('Check Deployment') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "CHECKING DEPLOYMENT"
+                    echo "======================================"
+
+                    echo ""
+                    echo "Deployments:"
+                    $KUBECTL get deployments
+
+                    echo ""
+                    echo "Pods:"
+                    $KUBECTL get pods -o wide
+
+                    echo ""
+                    echo "Services:"
+                    $KUBECTL get services
+                '''
+            }
+        }
+
+        stage('Wait for Pods') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "WAITING FOR APPLICATION"
+                    echo "======================================"
+
+                    DEPLOYMENT_NAME=$(
+                        $KUBECTL get deployment \
+                        -o jsonpath='{.items[0].metadata.name}'
+                    )
+
+                    if [ -z "$DEPLOYMENT_NAME" ]; then
+                        echo "ERROR: No deployment found."
+                        exit 1
+                    fi
+
+                    echo "Deployment: $DEPLOYMENT_NAME"
+
+                    $KUBECTL rollout status \
+                        deployment/$DEPLOYMENT_NAME \
+                        --timeout=10m
+
+                    echo ""
+                    echo "Application rollout successful."
+                '''
+            }
+        }
+
+        stage('Final Verification') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "FINAL APPLICATION VERIFICATION"
+                    echo "======================================"
+
+                    echo ""
+                    echo "DEPLOYMENTS:"
+                    $KUBECTL get deployments
+
+                    echo ""
+                    echo "PODS:"
+                    $KUBECTL get pods -o wide
+
+                    echo ""
+                    echo "SERVICES:"
+                    $KUBECTL get svc
+
+                    echo ""
+                    echo "======================================"
+                    echo "DEPLOYMENT COMPLETED SUCCESSFULLY"
+                    echo "======================================"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '''
+======================================
+DEPLOYMENT PIPELINE SUCCESS
+======================================
+
+EKS                : CONNECTED
+ECR IMAGE          : CONFIGURED
+KUBERNETES         : DEPLOYED
+APPLICATION        : RUNNING
+
+======================================
+'''
+        }
+
+        failure {
+            echo '''
+======================================
+DEPLOYMENT PIPELINE FAILED
+======================================
+
+Check the failed stage above.
+
+======================================
+'''
+        }
+
+        always {
+            sh '''
+                rm -f k8s_files/deployment.generated.yaml || true
+            '''
         }
     }
 }

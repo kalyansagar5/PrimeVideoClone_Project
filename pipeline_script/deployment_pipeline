@@ -2,59 +2,172 @@ pipeline {
     agent any
 
     environment {
-        KUBECTL = '/usr/local/bin/kubectl'
+        PATH = "/usr/local/bin:/usr/bin:/bin:${env.PATH}"
+        KUBECTL = "/usr/local/bin/kubectl"
+        HELM = "/usr/local/bin/helm"
+        AWS_DEFAULT_REGION = "us-east-1"
     }
 
     parameters {
-        string(name: 'CLUSTER_NAME', defaultValue: 'amazon-prime-cluster', description: 'Enter your EKS cluster name')
+        string(
+            name: 'CLUSTER_NAME',
+            defaultValue: 'amazon-prime-cluster',
+            description: 'Enter your EKS cluster name'
+        )
     }
 
     stages {
+
+        stage("Check Tools") {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Checking AWS..."
+                    aws --version
+
+                    echo "Checking kubectl..."
+                    ${KUBECTL} version --client
+
+                    echo "Checking Helm..."
+                    ${HELM} version
+                '''
+            }
+        }
+
         stage("Login to EKS") {
             steps {
-                script {
-                    withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'),
-                                     string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
-                        sh "aws eks --region us-east-1 update-kubeconfig --name ${params.CLUSTER_NAME}"
-                    }
+                withCredentials([
+                    string(
+                        credentialsId: 'access-key',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'secret-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        echo "Logging in to EKS..."
+
+                        aws eks update-kubeconfig \
+                            --region "$AWS_DEFAULT_REGION" \
+                            --name "$CLUSTER_NAME"
+
+                        echo "Testing EKS connection..."
+
+                        ${KUBECTL} get nodes
+                    '''
                 }
             }
         }
 
         stage("Configure Prometheus & Grafana") {
             steps {
-                script {
-                    sh """
-                    helm repo add stable https://charts.helm.sh/stable || true
-                    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
-                    # Check if namespace 'prometheus' exists
-                    if kubectl get namespace prometheus > /dev/null 2>&1; then
-                        # If namespace exists, upgrade the Helm release
-                        helm upgrade stable prometheus-community/kube-prometheus-stack -n prometheus
-                    else
-                        # If namespace does not exist, create it and install Helm release
-                        kubectl create namespace prometheus
-                        helm install stable prometheus-community/kube-prometheus-stack -n prometheus
-                    fi
-                    kubectl patch svc stable-kube-prometheus-sta-prometheus -n prometheus -p '{"spec": {"type": "LoadBalancer"}}'
-                    kubectl patch svc stable-grafana -n prometheus -p '{"spec": {"type": "LoadBalancer"}}'
-                    """
-                }
+                sh '''
+                    set -e
+
+                    echo "Adding Prometheus Helm repository..."
+
+                    ${HELM} repo add prometheus-community \
+                        https://prometheus-community.github.io/helm-charts \
+                        --force-update
+
+                    ${HELM} repo update
+
+                    echo "Creating Prometheus namespace..."
+
+                    ${KUBECTL} get namespace prometheus >/dev/null 2>&1 || \
+                        ${KUBECTL} create namespace prometheus
+
+                    echo "Installing/Upgrading Prometheus..."
+
+                    ${HELM} upgrade --install prometheus \
+                        prometheus-community/kube-prometheus-stack \
+                        --namespace prometheus \
+                        --create-namespace \
+                        --wait \
+                        --timeout 10m
+
+                    echo "Prometheus pods:"
+
+                    ${KUBECTL} get pods -n prometheus
+
+                    echo "Changing Prometheus service to LoadBalancer..."
+
+                    ${KUBECTL} patch svc prometheus-kube-prometheus-prometheus \
+                        -n prometheus \
+                        -p '{"spec":{"type":"LoadBalancer"}}' \
+                        || true
+
+                    echo "Changing Grafana service to LoadBalancer..."
+
+                    ${KUBECTL} patch svc prometheus-grafana \
+                        -n prometheus \
+                        -p '{"spec":{"type":"LoadBalancer"}}' \
+                        || true
+
+                    echo "Prometheus/Grafana services:"
+
+                    ${KUBECTL} get svc -n prometheus
+                '''
             }
         }
 
         stage("Configure ArgoCD") {
             steps {
-                script {
-                    sh """
-                    # Install ArgoCD
-                    kubectl create namespace argocd || true
-                    kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-                    kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
-                    """
-                }
+                sh '''
+                    set -e
+
+                    echo "Creating ArgoCD namespace..."
+
+                    ${KUBECTL} get namespace argocd >/dev/null 2>&1 || \
+                        ${KUBECTL} create namespace argocd
+
+                    echo "Installing ArgoCD..."
+
+                    ${KUBECTL} apply \
+                        -n argocd \
+                        -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+                    echo "Waiting for ArgoCD..."
+
+                    ${KUBECTL} rollout status deployment/argocd-server \
+                        -n argocd \
+                        --timeout=10m
+
+                    echo "Changing ArgoCD service to LoadBalancer..."
+
+                    ${KUBECTL} patch svc argocd-server \
+                        -n argocd \
+                        -p '{"spec":{"type":"LoadBalancer"}}'
+
+                    echo "ArgoCD pods:"
+
+                    ${KUBECTL} get pods -n argocd
+
+                    echo "ArgoCD services:"
+
+                    ${KUBECTL} get svc -n argocd
+                '''
             }
         }
-		
+    }
+
+    post {
+        success {
+            echo "======================================"
+            echo "Pipeline completed successfully!"
+            echo "======================================"
+        }
+
+        failure {
+            echo "======================================"
+            echo "Pipeline failed!"
+            echo "Check the failed stage above."
+            echo "======================================"
+        }
     }
 }

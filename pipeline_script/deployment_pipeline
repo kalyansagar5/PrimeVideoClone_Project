@@ -17,7 +17,7 @@ parameters {
 
 stages {
 
-    stage("Check Tools") {
+    stage('Check Tools') {
         steps {
             sh '''
                 set -e
@@ -35,14 +35,12 @@ stages {
                 echo "Helm:"
                 $HELM version
 
-                echo "======================================"
-                echo "All tools are available"
-                echo "======================================"
+                echo "All tools are available."
             '''
         }
     }
 
-    stage("Login to EKS") {
+    stage('Login to EKS') {
         steps {
             withCredentials([
                 string(
@@ -75,7 +73,7 @@ stages {
         }
     }
 
-    stage("Configure Prometheus & Grafana") {
+    stage('Configure Prometheus & Grafana') {
         steps {
             sh '''
                 set -e
@@ -140,12 +138,12 @@ stages {
 
                 $KUBECTL get svc -n prometheus
 
-                echo "Prometheus/Grafana installation completed."
+                echo "Prometheus and Grafana installation completed."
             '''
         }
     }
 
-    stage("Configure ArgoCD") {
+    stage('Configure ArgoCD') {
         steps {
             sh '''
                 set -e
@@ -160,7 +158,7 @@ stages {
                     --dry-run=client \
                     -o yaml | $KUBECTL apply -f -
 
-                echo "Installing ArgoCD using SERVER-SIDE APPLY..."
+                echo "Installing ArgoCD using server-side apply..."
 
                 $KUBECTL apply \
                     --server-side \
@@ -205,7 +203,7 @@ stages {
         }
     }
 
-    stage("Final Verification") {
+    stage('Final Verification') {
         steps {
             sh '''
                 set -e
@@ -219,7 +217,7 @@ stages {
                 $KUBECTL get nodes -o wide
 
                 echo ""
-                echo "SYSTEM PODS:"
+                echo "ALL PODS:"
                 $KUBECTL get pods -A
 
                 echo ""
@@ -241,4 +239,24 @@ stages {
 
 post {
     success {
-        echo '''
+        echo "======================================"
+        echo "PIPELINE SUCCESS"
+        echo "======================================"
+        echo "EKS               : CONNECTED"
+        echo "Prometheus        : INSTALLED"
+        echo "Grafana           : INSTALLED"
+        echo "ArgoCD             : INSTALLED"
+        echo "LoadBalancers     : CONFIGURED"
+        echo "======================================"
+    }
+
+    failure {
+        echo "======================================"
+        echo "PIPELINE FAILED"
+        echo "======================================"
+        echo "Check the failed stage above."
+        echo "======================================"
+    }
+}
+
+}

@@ -28,6 +28,33 @@ pipeline {
 
     stages {
 
+        stage('Check Parameters') {
+            steps {
+                script {
+                    if (!params.CLUSTER_NAME?.trim()) {
+                        error("CLUSTER_NAME is empty. Please enter amazon-prime-cluster.")
+                    }
+
+                    if (!params.ECR_REPO_NAME?.trim()) {
+                        error("ECR_REPO_NAME is empty.")
+                    }
+
+                    if (!params.VERSION?.trim()) {
+                        error("VERSION is empty.")
+                    }
+
+                    echo "======================================"
+                    echo "PIPELINE PARAMETERS"
+                    echo "======================================"
+                    echo "Cluster     : ${params.CLUSTER_NAME}"
+                    echo "Region      : ${env.AWS_DEFAULT_REGION}"
+                    echo "ECR Repo    : ${params.ECR_REPO_NAME}"
+                    echo "Version     : ${params.VERSION}"
+                    echo "======================================"
+                }
+            }
+        }
+
         stage('Check Tools') {
             steps {
                 sh '''
@@ -50,17 +77,6 @@ pipeline {
             }
         }
 
-        stage('Clone GitHub Repository') {
-            steps {
-                echo "======================================"
-                echo "CLONING GITHUB REPOSITORY"
-                echo "======================================"
-
-                git branch: 'main',
-                    url: 'https://github.com/kalyansagar5/PrimeVideoClone_Project.git'
-            }
-        }
-
         stage('Login to EKS') {
             steps {
                 withCredentials([
@@ -73,36 +89,47 @@ pipeline {
                         variable: 'AWS_SECRET_ACCESS_KEY'
                     )
                 ]) {
-                    sh '''
-                        set -e
+                    script {
+                        // Explicitly pass Jenkins parameter to environment
+                        env.EKS_CLUSTER_NAME = params.CLUSTER_NAME.trim()
 
-                        echo "======================================"
-                        echo "CONNECTING TO EKS"
-                        echo "======================================"
+                        sh '''
+                            set -e
 
-                        aws eks update-kubeconfig \
-                            --region "$AWS_DEFAULT_REGION" \
-                            --name "$CLUSTER_NAME"
+                            echo "======================================"
+                            echo "CONNECTING TO EKS"
+                            echo "======================================"
 
-                        echo ""
-                        echo "Current Kubernetes context:"
-                        $KUBECTL config current-context
+                            echo "Cluster : $EKS_CLUSTER_NAME"
+                            echo "Region  : $AWS_DEFAULT_REGION"
 
-                        echo ""
-                        echo "EKS cluster status:"
-                        aws eks describe-cluster \
-                            --region "$AWS_DEFAULT_REGION" \
-                            --name "$CLUSTER_NAME" \
-                            --query "cluster.status" \
-                            --output text
+                            if [ -z "$EKS_CLUSTER_NAME" ]; then
+                                echo "ERROR: EKS_CLUSTER_NAME is empty."
+                                exit 1
+                            fi
 
-                        echo ""
-                        echo "EKS nodes:"
-                        $KUBECTL get nodes
+                            aws eks describe-cluster \
+                                --region "$AWS_DEFAULT_REGION" \
+                                --name "$EKS_CLUSTER_NAME" \
+                                --query "cluster.status" \
+                                --output text
 
-                        echo ""
-                        echo "EKS connection successful."
-                    '''
+                            aws eks update-kubeconfig \
+                                --region "$AWS_DEFAULT_REGION" \
+                                --name "$EKS_CLUSTER_NAME"
+
+                            echo ""
+                            echo "Current Kubernetes context:"
+                            $KUBECTL config current-context
+
+                            echo ""
+                            echo "EKS nodes:"
+                            $KUBECTL get nodes
+
+                            echo ""
+                            echo "EKS connection successful."
+                        '''
+                    }
                 }
             }
         }
@@ -137,17 +164,21 @@ pipeline {
 
         stage('Prepare Deployment Image') {
             steps {
+                script {
+                    env.ECR_IMAGE = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_DEFAULT_REGION}.amazonaws.com/${params.ECR_REPO_NAME}:${params.VERSION}"
+
+                    echo "======================================"
+                    echo "APPLICATION IMAGE"
+                    echo "======================================"
+                    echo "${env.ECR_IMAGE}"
+                }
+
                 sh '''
                     set -e
 
                     echo "======================================"
-                    echo "PREPARING APPLICATION IMAGE"
+                    echo "PREPARING KUBERNETES MANIFEST"
                     echo "======================================"
-
-                    ECR_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPO_NAME:$VERSION"
-
-                    echo "ECR Image:"
-                    echo "$ECR_IMAGE"
 
                     if [ ! -f k8s_files/deployment.yaml ]; then
                         echo "ERROR: k8s_files/deployment.yaml not found."
@@ -159,14 +190,12 @@ pipeline {
                         exit 1
                     fi
 
-                    # Create temporary deployment manifest.
-                    # Original deployment.yaml is NOT modified.
                     sed "s|image:.*|image: $ECR_IMAGE|" \
                         k8s_files/deployment.yaml \
                         > k8s_files/deployment.generated.yaml
 
                     echo ""
-                    echo "Image configured as:"
+                    echo "Image configured:"
                     grep "image:" k8s_files/deployment.generated.yaml
                 '''
             }
@@ -178,7 +207,7 @@ pipeline {
                     set -e
 
                     echo "======================================"
-                    echo "DEPLOYING APPLICATION TO EKS"
+                    echo "DEPLOYING APPLICATION"
                     echo "======================================"
 
                     $KUBECTL apply \
@@ -188,7 +217,7 @@ pipeline {
                         -f k8s_files/service.yaml
 
                     echo ""
-                    echo "Kubernetes manifests applied successfully."
+                    echo "Kubernetes resources applied."
                 '''
             }
         }
@@ -212,12 +241,12 @@ pipeline {
 
                     echo ""
                     echo "Services:"
-                    $KUBECTL get services
+                    $KUBECTL get svc
                 '''
             }
         }
 
-        stage('Wait for Pods') {
+        stage('Wait for Application') {
             steps {
                 sh '''
                     set -e
@@ -232,7 +261,7 @@ pipeline {
                     )
 
                     if [ -z "$DEPLOYMENT_NAME" ]; then
-                        echo "ERROR: No deployment found."
+                        echo "ERROR: No Kubernetes deployment found."
                         exit 1
                     fi
 
@@ -243,7 +272,7 @@ pipeline {
                         --timeout=10m
 
                     echo ""
-                    echo "Application rollout successful."
+                    echo "Application rollout completed."
                 '''
             }
         }
@@ -254,8 +283,12 @@ pipeline {
                     set -e
 
                     echo "======================================"
-                    echo "FINAL APPLICATION VERIFICATION"
+                    echo "FINAL VERIFICATION"
                     echo "======================================"
+
+                    echo ""
+                    echo "NODES:"
+                    $KUBECTL get nodes -o wide
 
                     echo ""
                     echo "DEPLOYMENTS:"
@@ -271,7 +304,7 @@ pipeline {
 
                     echo ""
                     echo "======================================"
-                    echo "DEPLOYMENT COMPLETED SUCCESSFULLY"
+                    echo "APPLICATION DEPLOYMENT COMPLETED"
                     echo "======================================"
                 '''
             }
@@ -285,10 +318,10 @@ pipeline {
 DEPLOYMENT PIPELINE SUCCESS
 ======================================
 
-EKS                : CONNECTED
-ECR IMAGE          : CONFIGURED
-KUBERNETES         : DEPLOYED
-APPLICATION        : RUNNING
+EKS         : CONNECTED
+ECR IMAGE   : CONFIGURED
+KUBERNETES  : DEPLOYED
+APPLICATION : VERIFIED
 
 ======================================
 '''

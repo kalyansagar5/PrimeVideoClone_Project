@@ -2,70 +2,375 @@ pipeline {
     agent any
 
     environment {
+        AWS_DEFAULT_REGION = 'us-east-1'
         KUBECTL = '/usr/local/bin/kubectl'
+        HELM = '/usr/local/bin/helm'
     }
 
     parameters {
-        string(name: 'CLUSTER_NAME', defaultValue: 'amazon-prime-cluster', description: 'Enter your EKS cluster name')
+        string(
+            name: 'CLUSTER_NAME',
+            defaultValue: 'amazon-prime-cluster',
+            description: 'Enter your EKS cluster name'
+        )
+
+        string(
+            name: 'ECR_REPO_NAME',
+            defaultValue: 'amazon-prime',
+            description: 'ECR repository to delete'
+        )
+
+        booleanParam(
+            name: 'DELETE_ECR',
+            defaultValue: true,
+            description: 'Delete the specified ECR repository'
+        )
+
+        booleanParam(
+            name: 'DELETE_KMS_KEY',
+            defaultValue: false,
+            description: 'Delete a specific KMS key. Disabled by default for safety.'
+        )
+
+        string(
+            name: 'KMS_KEY_ID',
+            defaultValue: '',
+            description: 'Specific KMS Key ID to schedule for deletion'
+        )
     }
 
     stages {
 
-        stage("Login to EKS") {
+        stage('Check Tools') {
             steps {
-                script {
-                    withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'),
-                                     string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
-                        sh "aws eks --region us-east-1 update-kubeconfig --name ${params.CLUSTER_NAME}"
-                    }
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "CHECKING TOOLS"
+                    echo "======================================"
+
+                    aws --version
+                    $KUBECTL version --client
+                    $HELM version
+
+                    echo "Tools check completed."
+                '''
+            }
+        }
+
+        stage('Login to EKS') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'access-key',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'secret-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        echo "======================================"
+                        echo "CONNECTING TO EKS"
+                        echo "======================================"
+
+                        echo "Cluster: $CLUSTER_NAME"
+                        echo "Region : $AWS_DEFAULT_REGION"
+
+                        if [ -z "$CLUSTER_NAME" ]; then
+                            echo "ERROR: CLUSTER_NAME is empty."
+                            exit 1
+                        fi
+
+                        aws eks describe-cluster \
+                            --region "$AWS_DEFAULT_REGION" \
+                            --name "$CLUSTER_NAME" \
+                            --query 'cluster.status' \
+                            --output text
+
+                        aws eks update-kubeconfig \
+                            --region "$AWS_DEFAULT_REGION" \
+                            --name "$CLUSTER_NAME"
+
+                        echo "Testing Kubernetes connection..."
+
+                        $KUBECTL get nodes
+
+                        echo "EKS connection successful."
+                    '''
                 }
             }
         }
-        
-        stage('Cleanup K8s Resources') {
+
+        stage('Cleanup Application') {
             steps {
-                script {
-                    // Step 1: Delete services and deployments
-                    sh 'kubectl delete svc kubernetes || true'
-                    sh 'kubectl delete deploy pandacloud-app || true'
-                    sh 'kubectl delete svc pandacloud-app || true'
+                sh '''
+                    set -e
 
-                    // Step 2: Delete ArgoCD installation and namespace
-                    sh 'kubectl delete -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml || true'
-                    sh 'kubectl delete namespace argocd || true'
+                    echo "======================================"
+                    echo "CLEANING APPLICATION"
+                    echo "======================================"
 
-                    // Step 3: List and uninstall Helm releases in prometheus namespace
-                    sh 'helm list -n prometheus || true'
-                    sh 'helm uninstall kube-stack -n prometheus || true'
-                    
-                    // Step 4: Delete prometheus namespace
-                    sh 'kubectl delete namespace prometheus || true'
+                    echo "Deleting application deployment..."
 
-                    // Step 5: Remove Helm repositories
-                    sh 'helm repo remove stable || true'
-                    sh 'helm repo remove prometheus-community || true'
+                    $KUBECTL delete deployment pandacloud-app \
+                        --ignore-not-found=true
+
+                    echo "Deleting application service..."
+
+                    $KUBECTL delete service pandacloud-app \
+                        --ignore-not-found=true
+
+                    echo "Application resources cleaned."
+                '''
+            }
+        }
+
+        stage('Cleanup ArgoCD') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "CLEANING ARGOCD"
+                    echo "======================================"
+
+                    if $KUBECTL get namespace argocd >/dev/null 2>&1; then
+
+                        echo "Deleting ArgoCD resources..."
+
+                        $KUBECTL delete \
+                            -n argocd \
+                            -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml \
+                            --ignore-not-found=true || true
+
+                        echo "Deleting ArgoCD namespace..."
+
+                        $KUBECTL delete namespace argocd \
+                            --ignore-not-found=true
+
+                    else
+                        echo "ArgoCD namespace does not exist."
+                    fi
+
+                    echo "ArgoCD cleanup completed."
+                '''
+            }
+        }
+
+        stage('Cleanup Prometheus & Grafana') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "CLEANING PROMETHEUS & GRAFANA"
+                    echo "======================================"
+
+                    echo "Current Helm releases:"
+                    $HELM list -n prometheus || true
+
+                    if $HELM status prometheus -n prometheus >/dev/null 2>&1; then
+
+                        echo "Uninstalling Prometheus Helm release..."
+
+                        $HELM uninstall prometheus \
+                            --namespace prometheus
+
+                    else
+                        echo "Prometheus Helm release does not exist."
+                    fi
+
+                    echo "Deleting Prometheus namespace..."
+
+                    $KUBECTL delete namespace prometheus \
+                        --ignore-not-found=true
+
+                    echo "Prometheus/Grafana cleanup completed."
+                '''
+            }
+        }
+
+        stage('Remove Helm Repositories') {
+            steps {
+                sh '''
+                    echo "======================================"
+                    echo "REMOVING HELM REPOSITORIES"
+                    echo "======================================"
+
+                    $HELM repo remove prometheus-community || true
+                    $HELM repo remove stable || true
+
+                    echo "Helm repository cleanup completed."
+                '''
+            }
+        }
+
+        stage('Delete ECR Repository') {
+            when {
+                expression {
+                    return params.DELETE_ECR
+                }
+            }
+
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'access-key',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'secret-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        echo "======================================"
+                        echo "DELETING ECR REPOSITORY"
+                        echo "======================================"
+
+                        echo "Repository: $ECR_REPO_NAME"
+
+                        if aws ecr describe-repositories \
+                            --repository-names "$ECR_REPO_NAME" \
+                            --region "$AWS_DEFAULT_REGION" \
+                            >/dev/null 2>&1; then
+
+                            aws ecr delete-repository \
+                                --repository-name "$ECR_REPO_NAME" \
+                                --region "$AWS_DEFAULT_REGION" \
+                                --force
+
+                            echo "ECR repository deleted."
+
+                        else
+                            echo "ECR repository does not exist."
+                        fi
+                    '''
                 }
             }
         }
-		
-        stage('Delete ECR Repository and KMS Keys') {
-            steps {
-                script {
-                    // Step 1: Delete ECR Repository
-                    sh '''
-                    aws ecr delete-repository --repository-name amazon-prime --region us-east-1 --force
-                    '''
 
-                    // Step 2: Delete KMS Keys
+        stage('Schedule Specific KMS Key Deletion') {
+            when {
+                expression {
+                    return params.DELETE_KMS_KEY &&
+                           params.KMS_KEY_ID?.trim()
+                }
+            }
+
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'access-key',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'secret-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
                     sh '''
-                    for key in $(aws kms list-keys --region us-east-1 --query "Keys[*].KeyId" --output text); do
-                        aws kms disable-key --key-id $key --region us-east-1
-                        aws kms schedule-key-deletion --key-id $key --pending-window-in-days 7 --region us-east-1
-                    done
+                        set -e
+
+                        echo "======================================"
+                        echo "SCHEDULING KMS KEY DELETION"
+                        echo "======================================"
+
+                        echo "KMS Key: $KMS_KEY_ID"
+
+                        aws kms describe-key \
+                            --key-id "$KMS_KEY_ID" \
+                            --region "$AWS_DEFAULT_REGION"
+
+                        echo "Scheduling KMS key deletion..."
+
+                        aws kms schedule-key-deletion \
+                            --key-id "$KMS_KEY_ID" \
+                            --pending-window-in-days 7 \
+                            --region "$AWS_DEFAULT_REGION"
+
+                        echo "KMS key scheduled for deletion."
                     '''
                 }
             }
-        }		
-		
+        }
+
+        stage('Final Verification') {
+            steps {
+                sh '''
+                    echo "======================================"
+                    echo "FINAL VERIFICATION"
+                    echo "======================================"
+
+                    echo ""
+                    echo "EKS NODES:"
+                    $KUBECTL get nodes || true
+
+                    echo ""
+                    echo "APPLICATION:"
+                    $KUBECTL get deployment pandacloud-app || true
+                    $KUBECTL get service pandacloud-app || true
+
+                    echo ""
+                    echo "PROMETHEUS NAMESPACE:"
+                    $KUBECTL get namespace prometheus || true
+
+                    echo ""
+                    echo "ARGOCD NAMESPACE:"
+                    $KUBECTL get namespace argocd || true
+
+                    echo ""
+                    echo "ECR REPOSITORY:"
+                    aws ecr describe-repositories \
+                        --repository-names "$ECR_REPO_NAME" \
+                        --region "$AWS_DEFAULT_REGION" \
+                        >/dev/null 2>&1 \
+                        && echo "ECR repository still exists." \
+                        || echo "ECR repository not found."
+
+                    echo ""
+                    echo "======================================"
+                    echo "CLEANUP COMPLETED"
+                    echo "======================================"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '''
+======================================
+CLEANUP PIPELINE SUCCESS
+======================================
+
+Application       : Cleaned
+Prometheus/Grafana: Cleaned
+ArgoCD             : Cleaned
+ECR                : Processed according to parameter
+KMS                : Processed only if explicitly requested
+
+======================================
+'''
+        }
+
+        failure {
+            echo '''
+======================================
+CLEANUP PIPELINE FAILED
+======================================
+
+Check the failed stage above.
+
+======================================
+'''
+        }
     }
 }

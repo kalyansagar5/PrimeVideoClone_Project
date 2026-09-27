@@ -1,37 +1,116 @@
 #!/bin/bash
-# This script is used to get the argocd, prometheus & grafana urls & credentials
+
+set -e
+
+CLUSTER_NAME="amazon-prime-cluster"
+REGION="us-east-1"
+
+echo "======================================"
+echo "Configuring AWS"
+echo "======================================"
 
 aws configure
-aws eks update-kubeconfig --region "us-east-1" --name "amazon-prime-cluster"
 
-# ArgoCD Access
-argo_url=$(kubectl get svc -n argocd | grep argocd-server | awk '{print$4}' | head -n 1)
-argo_initial_password=$(argocd admin initial-password -n argocd)
+echo "======================================"
+echo "Updating EKS kubeconfig"
+echo "======================================"
 
-# ArgoCD Credentials
-argo_user="admin"
+aws eks update-kubeconfig \
+    --region "$REGION" \
+    --name "$CLUSTER_NAME"
 
-argo_password=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 --decode)
+echo "======================================"
+echo "Checking EKS cluster"
+echo "======================================"
 
-# Prometheus and Grafana URLs and credentials
-prometheus_url=$(kubectl get svc -n prometheus | grep stable-kube-prometheus-sta-prometheus | awk '{print $4}')
-grafana_url=$(kubectl get svc -n prometheus | grep stable-grafana | awk '{print $4}')
-grafana_user="admin"
-grafana_password=$(kubectl get secret stable-grafana -n prometheus -o jsonpath="{.data.admin-password}" | base64 --decode)
+kubectl get nodes
 
-# Print or use these variables
-echo "------------------------"
-echo "ArgoCD URL: $argo_url"
-echo "ArgoCD User: $argo_user"
-echo "ArgoCD Initial Password: $argo_initial_password" | head -n 1
-echo
-echo "Prometheus URL: $prometheus_url":9090
-echo
-echo "Grafana URL: $grafana_url"
-echo "Grafana User: $grafana_user"
-echo "Grafana Password: $grafana_password"
-echo "------------------------"
+echo "======================================"
+echo "Getting ArgoCD information"
+echo "======================================"
+
+ARGOCD_NAMESPACE="argocd"
+
+if kubectl get namespace "$ARGOCD_NAMESPACE" >/dev/null 2>&1; then
+
+    ARGOCD_URL=$(kubectl get svc argocd-server \
+        -n "$ARGOCD_NAMESPACE" \
+        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+    if [ -z "$ARGOCD_URL" ]; then
+        ARGOCD_URL="LoadBalancer is still pending"
+    fi
+
+    ARGOCD_PASSWORD=$(kubectl -n "$ARGOCD_NAMESPACE" get secret argocd-initial-admin-secret \
+        -o jsonpath='{.data.password}' 2>/dev/null | base64 --decode 2>/dev/null || true)
+
+else
+    ARGOCD_URL="ArgoCD namespace does not exist"
+    ARGOCD_PASSWORD=""
+fi
+
+echo "======================================"
+echo "Getting Prometheus information"
+echo "======================================"
+
+PROMETHEUS_URL=$(kubectl get svc prometheus-kube-prometheus-prometheus \
+    -n prometheus \
+    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+
+if [ -z "$PROMETHEUS_URL" ]; then
+    PROMETHEUS_URL="LoadBalancer is still pending"
+fi
+
+echo "======================================"
+echo "Getting Grafana information"
+echo "======================================"
+
+GRAFANA_URL=$(kubectl get svc prometheus-grafana \
+    -n prometheus \
+    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+
+if [ -z "$GRAFANA_URL" ]; then
+    GRAFANA_URL="LoadBalancer is still pending"
+fi
+
+GRAFANA_PASSWORD=$(kubectl -n prometheus get secret prometheus-grafana \
+    -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 --decode 2>/dev/null || true)
+
+echo ""
+echo "======================================"
+echo "          ACCESS INFORMATION"
+echo "======================================"
+
+echo ""
+echo "ArgoCD"
+echo "--------------------------------------"
+echo "URL:      https://$ARGOCD_URL"
+echo "Username: admin"
+echo "Password: $ARGOCD_PASSWORD"
+
+echo ""
+echo "Prometheus"
+echo "--------------------------------------"
+echo "URL: http://$PROMETHEUS_URL:9090"
+
+echo ""
+echo "Grafana"
+echo "--------------------------------------"
+echo "URL:      http://$GRAFANA_URL"
+echo "Username: admin"
+echo "Password: $GRAFANA_PASSWORD"
+
+echo ""
+echo "======================================"
 
 # Run below commands
+# vi access.sh
+# chmod +x access.sh
+# ./access.sh
+#or
+# sh access.sh
+
+#or
+
 # chmod a+x access.sh
 # ./access.sh

@@ -1,63 +1,244 @@
-stage("Configure ArgoCD") {
-    steps {
-        sh '''
-            set -e
+pipeline {
+agent any
 
-            echo "======================================"
-            echo "Creating ArgoCD namespace..."
-            echo "======================================"
+environment {
+    AWS_DEFAULT_REGION = 'us-east-1'
+    KUBECTL = '/usr/local/bin/kubectl'
+    HELM = '/usr/local/bin/helm'
+}
 
-            kubectl create namespace argocd \
-                --dry-run=client \
-                -o yaml | kubectl apply -f -
+parameters {
+    string(
+        name: 'CLUSTER_NAME',
+        defaultValue: 'amazon-prime-cluster',
+        description: 'Enter your EKS cluster name'
+    )
+}
 
-            echo ""
-            echo "======================================"
-            echo "Installing ArgoCD using server-side apply..."
-            echo "======================================"
+stages {
 
-            kubectl apply \
-                --server-side \
-                --force-conflicts \
-                -n argocd \
-                -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+    stage("Check Tools") {
+        steps {
+            sh '''
+                set -e
 
-            echo ""
-            echo "======================================"
-            echo "Waiting for ArgoCD server..."
-            echo "======================================"
+                echo "======================================"
+                echo "Checking required tools"
+                echo "======================================"
 
-            kubectl rollout status deployment/argocd-server \
-                -n argocd \
-                --timeout=10m
+                echo "AWS CLI:"
+                aws --version
 
-            echo ""
-            echo "======================================"
-            echo "Changing ArgoCD service to LoadBalancer..."
-            echo "======================================"
+                echo "kubectl:"
+                $KUBECTL version --client
 
-            kubectl patch svc argocd-server \
-                -n argocd \
-                -p '{"spec":{"type":"LoadBalancer"}}'
+                echo "Helm:"
+                $HELM version
 
-            echo ""
-            echo "======================================"
-            echo "ArgoCD Pods"
-            echo "======================================"
+                echo "======================================"
+                echo "All tools are available"
+                echo "======================================"
+            '''
+        }
+    }
 
-            kubectl get pods -n argocd
+    stage("Login to EKS") {
+        steps {
+            withCredentials([
+                string(
+                    credentialsId: 'access-key',
+                    variable: 'AWS_ACCESS_KEY_ID'
+                ),
+                string(
+                    credentialsId: 'secret-key',
+                    variable: 'AWS_SECRET_ACCESS_KEY'
+                )
+            ]) {
+                sh '''
+                    set -e
 
-            echo ""
-            echo "======================================"
-            echo "ArgoCD Services"
-            echo "======================================"
+                    echo "======================================"
+                    echo "Connecting to EKS"
+                    echo "======================================"
 
-            kubectl get svc -n argocd
+                    aws eks update-kubeconfig \
+                        --region "$AWS_DEFAULT_REGION" \
+                        --name "$CLUSTER_NAME"
 
-            echo ""
-            echo "======================================"
-            echo "ArgoCD installation completed"
-            echo "======================================"
-        '''
+                    echo "Testing EKS connection..."
+
+                    $KUBECTL get nodes
+
+                    echo "EKS connection successful."
+                '''
+            }
+        }
+    }
+
+    stage("Configure Prometheus & Grafana") {
+        steps {
+            sh '''
+                set -e
+
+                echo "======================================"
+                echo "Installing Prometheus & Grafana"
+                echo "======================================"
+
+                echo "Adding Prometheus Helm repository..."
+
+                $HELM repo add \
+                    prometheus-community \
+                    https://prometheus-community.github.io/helm-charts \
+                    --force-update
+
+                echo "Updating Helm repositories..."
+
+                $HELM repo update
+
+                echo "Creating prometheus namespace..."
+
+                $KUBECTL create namespace prometheus \
+                    --dry-run=client \
+                    -o yaml | $KUBECTL apply -f -
+
+                echo "Installing/Upgrading kube-prometheus-stack..."
+
+                $HELM upgrade --install prometheus \
+                    prometheus-community/kube-prometheus-stack \
+                    --namespace prometheus \
+                    --create-namespace \
+                    --wait \
+                    --timeout 10m
+
+                echo "======================================"
+                echo "Prometheus pods"
+                echo "======================================"
+
+                $KUBECTL get pods -n prometheus
+
+                echo "======================================"
+                echo "Changing Prometheus to LoadBalancer"
+                echo "======================================"
+
+                $KUBECTL patch svc \
+                    prometheus-kube-prometheus-prometheus \
+                    -n prometheus \
+                    -p '{"spec":{"type":"LoadBalancer"}}'
+
+                echo "======================================"
+                echo "Changing Grafana to LoadBalancer"
+                echo "======================================"
+
+                $KUBECTL patch svc \
+                    prometheus-grafana \
+                    -n prometheus \
+                    -p '{"spec":{"type":"LoadBalancer"}}'
+
+                echo "======================================"
+                echo "Prometheus and Grafana services"
+                echo "======================================"
+
+                $KUBECTL get svc -n prometheus
+
+                echo "Prometheus/Grafana installation completed."
+            '''
+        }
+    }
+
+    stage("Configure ArgoCD") {
+        steps {
+            sh '''
+                set -e
+
+                echo "======================================"
+                echo "Installing ArgoCD"
+                echo "======================================"
+
+                echo "Creating ArgoCD namespace..."
+
+                $KUBECTL create namespace argocd \
+                    --dry-run=client \
+                    -o yaml | $KUBECTL apply -f -
+
+                echo "Installing ArgoCD using SERVER-SIDE APPLY..."
+
+                $KUBECTL apply \
+                    --server-side \
+                    --force-conflicts \
+                    -n argocd \
+                    -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+                echo "ArgoCD manifest applied successfully."
+
+                echo "======================================"
+                echo "Changing ArgoCD Server to LoadBalancer"
+                echo "======================================"
+
+                $KUBECTL patch svc argocd-server \
+                    -n argocd \
+                    -p '{"spec":{"type":"LoadBalancer"}}'
+
+                echo "======================================"
+                echo "Waiting for ArgoCD server"
+                echo "======================================"
+
+                $KUBECTL wait \
+                    --for=condition=available \
+                    deployment/argocd-server \
+                    -n argocd \
+                    --timeout=10m
+
+                echo "======================================"
+                echo "ArgoCD pods"
+                echo "======================================"
+
+                $KUBECTL get pods -n argocd
+
+                echo "======================================"
+                echo "ArgoCD services"
+                echo "======================================"
+
+                $KUBECTL get svc -n argocd
+
+                echo "ArgoCD installation completed."
+            '''
+        }
+    }
+
+    stage("Final Verification") {
+        steps {
+            sh '''
+                set -e
+
+                echo "======================================"
+                echo "FINAL EKS VERIFICATION"
+                echo "======================================"
+
+                echo ""
+                echo "EKS NODES:"
+                $KUBECTL get nodes -o wide
+
+                echo ""
+                echo "SYSTEM PODS:"
+                $KUBECTL get pods -A
+
+                echo ""
+                echo "PROMETHEUS SERVICES:"
+                $KUBECTL get svc -n prometheus
+
+                echo ""
+                echo "ARGOCD SERVICES:"
+                $KUBECTL get svc -n argocd
+
+                echo ""
+                echo "======================================"
+                echo "DEPLOYMENT VERIFICATION COMPLETED"
+                echo "======================================"
+            '''
+        }
     }
 }
+
+post {
+    success {
+        echo '''

@@ -2,364 +2,678 @@
 
 set -e
 
-echo "======================================"
-echo "      DEVOPS SERVER SETUP"
-echo "======================================"
+# ============================================================
+# DEVOPS EC2 SETUP
+# Ubuntu EC2
+# ============================================================
 
-# --------------------------------------------------
-# Update system
-# --------------------------------------------------
+echo "========================================="
+echo " DEVOPS SERVER SETUP STARTED"
+echo "========================================="
 
-echo "Updating system packages..."
+# ------------------------------------------------------------
+# ROOT CHECK
+# ------------------------------------------------------------
 
-sudo apt-get update -y
-sudo apt-get upgrade -y
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: Run this script as root."
+    exit 1
+fi
 
-# --------------------------------------------------
-# Basic packages
-# --------------------------------------------------
+export DEBIAN_FRONTEND=noninteractive
 
-echo "Installing basic packages..."
+# ------------------------------------------------------------
+# LOGGING
+# ------------------------------------------------------------
 
-sudo apt-get install -y \
+LOG_FILE="/var/log/devops-setup.log"
+
+touch "$LOG_FILE"
+chmod 600 "$LOG_FILE"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo
+echo "Setup started at: $(date)"
+echo
+
+# ============================================================
+# SYSTEM UPDATE
+# ============================================================
+
+echo "========================================="
+echo " UPDATING SYSTEM"
+echo "========================================="
+
+apt-get update -y
+apt-get upgrade -y
+
+# ============================================================
+# BASIC PACKAGES
+# ============================================================
+
+echo "========================================="
+echo " INSTALLING BASIC PACKAGES"
+echo "========================================="
+
+apt-get install -y \
     curl \
     wget \
     unzip \
     ca-certificates \
     gnupg \
+    lsb-release \
     apt-transport-https \
-    software-properties-common
+    software-properties-common \
+    git \
+    jq \
+    vim \
+    net-tools \
+    tar \
+    gzip
 
-# --------------------------------------------------
-# AWS CLI
-# --------------------------------------------------
+# ============================================================
+# AWS CLI V2
+# ============================================================
 
-echo "======================================"
-echo "Installing AWS CLI"
-echo "======================================"
+echo "========================================="
+echo " INSTALLING AWS CLI V2"
+echo "========================================="
 
 if command -v aws >/dev/null 2>&1; then
+
     echo "AWS CLI already installed."
+
 else
-    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
-        -o /tmp/awscliv2.zip
+
+    cd /tmp
+
+    rm -rf aws
+    rm -f awscliv2.zip
+
+    curl -fsSL \
+        "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
+        -o awscliv2.zip
+
+    unzip -q awscliv2.zip
+
+    ./aws/install
 
     rm -rf /tmp/aws
+    rm -f /tmp/awscliv2.zip
 
-    unzip -q /tmp/awscliv2.zip -d /tmp
-
-    sudo /tmp/aws/install
-
-    rm -rf /tmp/aws /tmp/awscliv2.zip
 fi
 
+echo
+echo "AWS CLI version:"
 aws --version
 
-# --------------------------------------------------
-# Docker
-# --------------------------------------------------
+# ============================================================
+# DOCKER
+# ============================================================
 
-echo "======================================"
-echo "Installing Docker"
-echo "======================================"
+echo "========================================="
+echo " INSTALLING DOCKER"
+echo "========================================="
 
-sudo install -m 0755 -d /etc/apt/keyrings
+install -m 0755 -d /etc/apt/keyrings
 
-if [ ! -f /etc/apt/keyrings/docker.asc ]; then
-    sudo curl -fsSL \
-        https://download.docker.com/linux/ubuntu/gpg \
-        -o /etc/apt/keyrings/docker.asc
-fi
+rm -f /etc/apt/keyrings/docker.asc
 
-sudo chmod a+r /etc/apt/keyrings/docker.asc
+curl -fsSL \
+    https://download.docker.com/linux/ubuntu/gpg \
+    -o /etc/apt/keyrings/docker.asc
 
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+chmod a+r /etc/apt/keyrings/docker.asc
 
-sudo apt-get update -y
+. /etc/os-release
 
-sudo apt-get install -y \
+cat > /etc/apt/sources.list.d/docker.list <<EOF
+deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable
+EOF
+
+apt-get update -y
+
+apt-get install -y \
     docker-ce \
     docker-ce-cli \
     containerd.io \
     docker-buildx-plugin \
     docker-compose-plugin
 
-sudo systemctl enable docker
-sudo systemctl start docker
+systemctl enable docker
+systemctl start docker
 
-# Add users to Docker group
-sudo usermod -aG docker ubuntu || true
-sudo usermod -aG docker jenkins || true
+if id ubuntu >/dev/null 2>&1; then
+    usermod -aG docker ubuntu
+fi
 
-# Allow Docker socket access
-sudo chmod 666 /var/run/docker.sock
-
+echo
+echo "Docker version:"
 docker --version
 
-# --------------------------------------------------
-# SonarQube
-# --------------------------------------------------
+echo
+echo "Docker Compose version:"
+docker compose version
 
-echo "======================================"
-echo "Installing SonarQube"
-echo "======================================"
+# ============================================================
+# JAVA 21
+# ============================================================
 
-if sudo docker ps -a --format '{{.Names}}' | grep -q "^sonar$"; then
-    echo "SonarQube container already exists."
-else
-    sudo docker run -d \
-        --name sonar \
-        --restart unless-stopped \
-        -p 9000:9000 \
-        sonarqube:lts-community
+echo "========================================="
+echo " INSTALLING JAVA 21"
+echo "========================================="
+
+apt-get install -y \
+    openjdk-21-jdk \
+    openjdk-21-jre
+
+JAVA_HOME_PATH="/usr/lib/jvm/java-21-openjdk-amd64"
+
+if [ -d "$JAVA_HOME_PATH" ]; then
+
+    update-alternatives \
+        --set java \
+        "$JAVA_HOME_PATH/bin/java" || true
+
+    update-alternatives \
+        --set javac \
+        "$JAVA_HOME_PATH/bin/javac" || true
+
+    cat > /etc/profile.d/java.sh <<EOF
+export JAVA_HOME=$JAVA_HOME_PATH
+export PATH=\$JAVA_HOME/bin:\$PATH
+EOF
+
+    chmod 644 /etc/profile.d/java.sh
+
+    export JAVA_HOME="$JAVA_HOME_PATH"
+    export PATH="$JAVA_HOME/bin:$PATH"
+
 fi
 
-echo "SonarQube container status:"
-sudo docker ps --filter "name=sonar"
-
-# --------------------------------------------------
-# Trivy
-# --------------------------------------------------
-
-echo "======================================"
-echo "Installing Trivy"
-echo "======================================"
-
-if command -v trivy >/dev/null 2>&1; then
-    echo "Trivy already installed."
-else
-
-    sudo mkdir -p /usr/share/keyrings
-
-    wget -qO- \
-        https://aquasecurity.github.io/trivy-repo/deb/public.key \
-        | gpg --dearmor \
-        | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
-
-    echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
-        | sudo tee /etc/apt/sources.list.d/trivy.list > /dev/null
-
-    sudo apt-get update -y
-
-    sudo apt-get install -y trivy
-fi
-
-trivy --version
-
-# --------------------------------------------------
-# Java 17
-# --------------------------------------------------
-
-echo "======================================"
-echo "Installing Java 17"
-echo "======================================"
-
-sudo apt-get install -y \
-    openjdk-17-jdk \
-    openjdk-17-jre
-
+echo
+echo "Java version:"
 java -version
 
-# --------------------------------------------------
-# Jenkins
-# --------------------------------------------------
+echo
+echo "JAVA_HOME:"
+echo "$JAVA_HOME"
 
-echo "======================================"
-echo "Installing Jenkins"
-echo "======================================"
+# ============================================================
+# KUBECTL
+# ============================================================
 
-if command -v jenkins >/dev/null 2>&1; then
-    echo "Jenkins already installed."
-else
+echo "========================================="
+echo " INSTALLING KUBECTL"
+echo "========================================="
 
-    sudo mkdir -p /etc/apt/keyrings
+mkdir -p /etc/apt/keyrings
 
-    sudo wget -O \
-        /etc/apt/keyrings/jenkins-keyring.asc \
-        https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+rm -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
-    echo "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/" \
-        | sudo tee /etc/apt/sources.list.d/jenkins.list > /dev/null
+curl -fsSL \
+    https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key \
+    | gpg --dearmor \
+    -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
-    sudo apt-get update -y
+chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
-    sudo apt-get install -y jenkins
-fi
+cat > /etc/apt/sources.list.d/kubernetes.list <<EOF
+deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /
+EOF
 
-sudo systemctl enable jenkins
-sudo systemctl restart jenkins
+apt-get update -y
 
-# Give Jenkins access to Docker
-sudo usermod -aG docker jenkins
+apt-get install -y kubectl
 
-# --------------------------------------------------
-# kubectl
-# --------------------------------------------------
-
-echo "======================================"
-echo "Installing kubectl"
-echo "======================================"
-
-if command -v kubectl >/dev/null 2>&1; then
-    echo "kubectl already installed."
-else
-
-    curl -LO \
-        "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-
-    sudo install \
-        -o root \
-        -g root \
-        -m 0755 \
-        kubectl \
-        /usr/local/bin/kubectl
-
-    rm -f kubectl
-fi
-
+echo
+echo "kubectl version:"
 kubectl version --client
 
-# --------------------------------------------------
-# Helm
-# --------------------------------------------------
+# ============================================================
+# HELM
+# ============================================================
 
-echo "======================================"
-echo "Installing Helm"
-echo "======================================"
+echo "========================================="
+echo " INSTALLING HELM"
+echo "========================================="
 
+# Remove any broken Helm repository from previous runs
+rm -f /etc/apt/sources.list.d/helm-stable-debian.list
+rm -f /usr/share/keyrings/helm.gpg
+
+# If Helm already exists, keep it
 if command -v helm >/dev/null 2>&1; then
+
     echo "Helm already installed."
+
 else
 
-    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
-        | bash
+    echo "Downloading Helm installer..."
+
+    cd /tmp
+
+    rm -f get_helm.sh
+
+    curl -fsSL \
+        https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
+        -o get_helm.sh
+
+    chmod 700 get_helm.sh
+
+    ./get_helm.sh
+
+    rm -f get_helm.sh
+
 fi
 
+if ! command -v helm >/dev/null 2>&1; then
+    echo "ERROR: Helm installation failed."
+    exit 1
+fi
+
+echo
+echo "Helm version:"
 helm version
 
-# --------------------------------------------------
-# Permissions for Jenkins
-# --------------------------------------------------
+# ============================================================
+# TRIVY
+# ============================================================
 
-echo "======================================"
-echo "Configuring Jenkins permissions"
-echo "======================================"
+echo "========================================="
+echo " INSTALLING TRIVY"
+echo "========================================="
 
-sudo usermod -aG docker jenkins
+mkdir -p /etc/apt/keyrings
 
-# Make sure Jenkins can execute kubectl and helm
-sudo chmod 755 /usr/local/bin/kubectl 2>/dev/null || true
-sudo chmod 755 /usr/local/bin/helm 2>/dev/null || true
+rm -f /etc/apt/keyrings/trivy.gpg
 
-# --------------------------------------------------
-# Restart Jenkins
-# --------------------------------------------------
+curl -fsSL \
+    https://aquasecurity.github.io/trivy-repo/deb/public.key \
+    | gpg --dearmor \
+    -o /etc/apt/keyrings/trivy.gpg
 
-echo "Restarting Jenkins..."
+chmod 644 /etc/apt/keyrings/trivy.gpg
 
-sudo systemctl restart jenkins
+cat > /etc/apt/sources.list.d/trivy.list <<EOF
+deb [signed-by=/etc/apt/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main
+EOF
 
-# --------------------------------------------------
-# Versions / Verification
-# --------------------------------------------------
+apt-get update -y
 
-echo "======================================"
-echo "      INSTALLATION VERIFICATION"
-echo "======================================"
+apt-get install -y trivy
 
-echo ""
-echo "AWS:"
+echo
+echo "Trivy version:"
+trivy --version
+
+# ============================================================
+# SONARQUBE SYSTEM CONFIGURATION
+# ============================================================
+
+echo "========================================="
+echo " CONFIGURING SONARQUBE"
+echo "========================================="
+
+cat > /etc/sysctl.d/99-sonarqube.conf <<EOF
+vm.max_map_count=524288
+fs.file-max=131072
+EOF
+
+sysctl --system
+
+# ============================================================
+# SONARQUBE
+# ============================================================
+
+echo "========================================="
+echo " INSTALLING SONARQUBE"
+echo "========================================="
+
+docker rm -f sonar 2>/dev/null || true
+
+echo "Pulling SonarQube image..."
+
+docker pull sonarqube:lts-community
+
+echo "Starting SonarQube..."
+
+docker run -d \
+    --name sonar \
+    --restart unless-stopped \
+    -p 9000:9000 \
+    sonarqube:lts-community
+
+echo
+echo "SonarQube container started."
+
+# ============================================================
+# WAIT FOR SONARQUBE
+# ============================================================
+
+echo "========================================="
+echo " WAITING FOR SONARQUBE"
+echo "========================================="
+
+SONAR_READY=false
+
+for i in $(seq 1 60); do
+
+    STATUS=$(curl -s \
+        --max-time 5 \
+        http://127.0.0.1:9000/api/system/status \
+        2>/dev/null || true)
+
+    if echo "$STATUS" | grep -q '"status":"UP"'; then
+
+        echo "SonarQube is UP."
+
+        SONAR_READY=true
+
+        break
+
+    fi
+
+    echo "Waiting for SonarQube... $i/60"
+
+    sleep 5
+
+done
+
+if [ "$SONAR_READY" = false ]; then
+
+    echo "WARNING: SonarQube did not reach UP state yet."
+
+    docker ps -a --filter "name=sonar"
+
+    echo
+    echo "Last SonarQube logs:"
+
+    docker logs --tail 50 sonar || true
+
+fi
+
+# ============================================================
+# JENKINS
+# ============================================================
+
+echo "========================================="
+echo " INSTALLING JENKINS"
+echo "========================================="
+
+mkdir -p /etc/apt/keyrings
+
+rm -f /etc/apt/keyrings/jenkins-keyring.asc
+
+wget -O /etc/apt/keyrings/jenkins-keyring.asc \
+    https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
+
+chmod 644 /etc/apt/keyrings/jenkins-keyring.asc
+
+cat > /etc/apt/sources.list.d/jenkins.list <<EOF
+deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/
+EOF
+
+apt-get update -y
+
+apt-get install -y jenkins
+
+# ============================================================
+# JENKINS + DOCKER
+# ============================================================
+
+echo "========================================="
+echo " CONFIGURING JENKINS"
+echo "========================================="
+
+usermod -aG docker jenkins
+
+systemctl daemon-reload
+
+systemctl enable jenkins
+systemctl restart jenkins
+
+# ============================================================
+# WAIT FOR JENKINS
+# ============================================================
+
+echo "========================================="
+echo " WAITING FOR JENKINS"
+echo "========================================="
+
+JENKINS_READY=false
+
+for i in $(seq 1 60); do
+
+    if systemctl is-active --quiet jenkins; then
+
+        echo "Jenkins is running."
+
+        JENKINS_READY=true
+
+        break
+
+    fi
+
+    echo "Waiting for Jenkins... $i/60"
+
+    sleep 2
+
+done
+
+if [ "$JENKINS_READY" = false ]; then
+
+    echo
+    echo "WARNING: Jenkins did not start."
+
+    systemctl status jenkins --no-pager -l || true
+
+fi
+
+# ============================================================
+# JENKINS INITIAL PASSWORD
+# ============================================================
+
+JENKINS_PASSWORD=""
+
+if [ -f /var/lib/jenkins/secrets/initialAdminPassword ]; then
+
+    JENKINS_PASSWORD=$(cat /var/lib/jenkins/secrets/initialAdminPassword)
+
+else
+
+    echo "Jenkins initial password not available yet."
+
+fi
+
+# ============================================================
+# GET PUBLIC IP
+# ============================================================
+
+echo "========================================="
+echo " GETTING PUBLIC IP"
+echo "========================================="
+
+PUBLIC_IP=""
+
+PUBLIC_IP=$(curl -fsS \
+    --max-time 10 \
+    https://checkip.amazonaws.com \
+    2>/dev/null || true)
+
+PUBLIC_IP=$(echo "$PUBLIC_IP" | tr -d '[:space:]')
+
+if [ -z "$PUBLIC_IP" ]; then
+
+    PUBLIC_IP=$(curl -fsS \
+        --max-time 10 \
+        https://ifconfig.me \
+        2>/dev/null || true)
+
+    PUBLIC_IP=$(echo "$PUBLIC_IP" | tr -d '[:space:]')
+
+fi
+
+# ============================================================
+# SAVE SERVER INFORMATION
+# ============================================================
+
+cat > /root/devops-info.txt <<EOF
+=========================================
+DEVOPS SERVER INFORMATION
+=========================================
+
+PUBLIC IP:
+${PUBLIC_IP}
+
+JENKINS:
+http://${PUBLIC_IP}:8080
+
+JENKINS INITIAL ADMIN PASSWORD:
+${JENKINS_PASSWORD}
+
+SONARQUBE:
+http://${PUBLIC_IP}:9000
+
+SONARQUBE DEFAULT LOGIN:
+Username: admin
+Password: admin
+
+=========================================
+INSTALLED TOOLS
+=========================================
+
+AWS:
+$(aws --version 2>&1)
+
+Docker:
+$(docker --version 2>&1)
+
+Docker Compose:
+$(docker compose version 2>&1)
+
+Java:
+$(java -version 2>&1 | head -1)
+
+kubectl:
+$(kubectl version --client 2>&1)
+
+Helm:
+$(helm version 2>&1)
+
+Trivy:
+$(trivy --version 2>&1)
+
+=========================================
+EOF
+
+chmod 600 /root/devops-info.txt
+
+# ============================================================
+# FINAL VERIFICATION
+# ============================================================
+
+echo
+echo "========================================="
+echo " FINAL VERIFICATION"
+echo "========================================="
+
+echo
+echo "AWS CLI:"
 aws --version
 
-echo ""
+echo
 echo "Docker:"
 docker --version
 
-echo ""
+echo
+echo "Docker Compose:"
+docker compose version
+
+echo
 echo "Java:"
 java -version
 
-echo ""
+echo
 echo "kubectl:"
 kubectl version --client
 
-echo ""
+echo
 echo "Helm:"
 helm version
 
-echo ""
+echo
 echo "Trivy:"
 trivy --version
 
-echo ""
+echo
 echo "Jenkins:"
-sudo systemctl is-active jenkins
+systemctl is-active jenkins || true
 
-echo ""
+echo
 echo "SonarQube:"
-sudo docker ps --filter "name=sonar"
+docker ps --filter "name=sonar"
 
-# --------------------------------------------------
-# Server IP
-# --------------------------------------------------
+# ============================================================
+# FINAL OUTPUT
+# ============================================================
 
-PUBLIC_IP=$(curl -s ifconfig.me || true)
+echo
+echo "========================================="
+echo " DEVOPS SETUP COMPLETED"
+echo "========================================="
 
-echo ""
-echo "======================================"
-echo "       ACCESS INFORMATION"
-echo "======================================"
+echo
+echo "Public IP:"
+echo "$PUBLIC_IP"
 
-echo ""
+echo
 echo "Jenkins:"
 echo "http://${PUBLIC_IP}:8080"
 
-echo ""
+echo
+echo "Jenkins Initial Admin Password:"
+echo "$JENKINS_PASSWORD"
+
+echo
 echo "SonarQube:"
 echo "http://${PUBLIC_IP}:9000"
 
-echo ""
-echo "Jenkins Initial Password:"
+echo
+echo "SonarQube Login:"
+echo "Username: admin"
+echo "Password: admin"
 
-if [ -f /var/lib/jenkins/secrets/initialAdminPassword ]; then
-    sudo cat /var/lib/jenkins/secrets/initialAdminPassword
-else
-    echo "Password file not available yet."
-    echo "Run:"
-    echo "sudo cat /var/lib/jenkins/secrets/initialAdminPassword"
-fi
+echo
+echo "Information file:"
+echo "/root/devops-info.txt"
 
-echo ""
-echo "======================================"
-echo "       SETUP COMPLETED"
-echo "======================================"
+echo
+echo "Setup log:"
+echo "/var/log/devops-setup.log"
 
-echo ""
-echo "Installed:"
-echo "  AWS CLI"
-echo "  Docker"
-echo "  SonarQube"
-echo "  Trivy"
-echo "  Java 17"
-echo "  Jenkins"
-echo "  kubectl"
-echo "  Helm"
+echo
+echo "========================================="
+echo " KUBERNETES / EKS"
+echo "========================================="
 
-echo ""
-echo "IMPORTANT:"
-echo "EKS authentication is intentionally NOT performed here."
-echo "Your Jenkins pipelines will run:"
-echo ""
-echo "aws eks update-kubeconfig \\"
-echo "  --region us-east-1 \\"
-echo "  --name amazon-prime-cluster"
-echo ""
-echo "using Jenkins AWS credentials."
+echo
+echo "kubectl and Helm are installed."
 
-echo ""
-echo "If Docker access gives a permission error,"
-echo "log out and log back in, or restart the Jenkins service."
-echo ""
+echo
+echo "To connect to EKS:"
+
+echo "aws eks update-kubeconfig --region <REGION> --name <CLUSTER_NAME>"
+
+echo
+echo "Then:"
+
+echo "kubectl get nodes"
+echo "kubectl get pods -A"
+echo "helm list -A"
+
+echo
+echo "========================================="
+echo " SETUP FINISHED"
+echo "========================================="

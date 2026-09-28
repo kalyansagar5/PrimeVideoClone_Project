@@ -1,23 +1,27 @@
 # DEFINE DEFAULT VARIABLES HERE
 
+# ============================================================
+# VARIABLES
+# ============================================================
+
 variable "instance_type" {
-  description = "Instance Type"
+  description = "EC2 Instance Type"
   type        = string
 }
 
 variable "ami" {
-  description = "AMI ID"
+  description = "Ubuntu AMI ID"
   type        = string
 }
 
 variable "key_name" {
-  description = "Key Pair"
+  description = "AWS EC2 Key Pair Name"
   type        = string
 }
 
 variable "volume_size" {
-  description = "Volume size"
-  type        = string
+  description = "Root EBS Volume Size in GB"
+  type        = number
 }
 
 variable "region_name" {

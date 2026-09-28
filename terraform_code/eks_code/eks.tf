@@ -1,39 +1,109 @@
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "19.15.1"
+  version = "21.26.0"
 
-  cluster_name                   = local.name
-  cluster_endpoint_public_access = true
+  name               = "amazon-prime-cluster"
+  kubernetes_version = "1.33"
 
-  cluster_addons = {
-    coredns = {
-      most_recent = true
-    }
-    kube-proxy = {
-      most_recent = true
-    }
+  # ---------------------------------------------------------
+  # EKS API ENDPOINT
+  # ---------------------------------------------------------
+
+  endpoint_public_access  = true
+  endpoint_private_access = true
+
+  enable_cluster_creator_admin_permissions = true
+
+  # ---------------------------------------------------------
+  # VPC
+  # ---------------------------------------------------------
+
+  vpc_id = module.vpc.vpc_id
+
+  subnet_ids = module.vpc.private_subnets
+
+  # ---------------------------------------------------------
+  # EKS ADDONS
+  # ---------------------------------------------------------
+
+  addons = {
     vpc-cni = {
-      most_recent = true
+      most_recent    = true
+      before_compute = true
+    }
+
+    kube-proxy = {
+      most_recent    = true
+      before_compute = true
+    }
+
+    coredns = {
+      most_recent    = true
+      before_compute = true
+    }
+
+    eks-pod-identity-agent = {
+      most_recent    = true
+      before_compute = true
     }
   }
 
-  vpc_id                   = module.vpc.vpc_id
-  subnet_ids               = module.vpc.private_subnets
+  # ---------------------------------------------------------
+  # MANAGED NODE GROUP
+  # ---------------------------------------------------------
 
   eks_managed_node_groups = {
     panda-node = {
-      min_size     = 2
-      max_size     = 4
-      desired_size = 2
+      name = "panda-node"
 
-      instance_types = ["t2.medium"]
-      capacity_type  = "SPOT"
+      # -----------------------------------------------------
+      # IMPORTANT
+      # -----------------------------------------------------
+      # Do NOT use the Ubuntu AMI:
+      #
+      # ami-0b6d9d3d33ba97d99
+      #
+      # Let EKS use the EKS-optimized Amazon Linux 2023 AMI.
+      # -----------------------------------------------------
+
+      ami_type = "AL2023_x86_64_STANDARD"
+
+      # Requested instance type
+      instance_types = [
+        "c7i-flex.large"
+      ]
+
+      capacity_type = "ON_DEMAND"
+
+      # Start with one node
+      min_size     = 1
+      desired_size = 1
+      max_size     = 1
+
+      # Worker nodes go into private subnets
+      subnet_ids = module.vpc.private_subnets
+
+      disk_size = 20
+
+      labels = {
+        Environment = "dev"
+        Project     = "amazon-prime"
+      }
 
       tags = {
-        ExtraTag = "Panda_Node"
+        Name        = "panda-node"
+        Environment = "dev"
+        Project     = "amazon-prime"
       }
     }
   }
 
-  tags = local.tags
+  # ---------------------------------------------------------
+  # TAGS
+  # ---------------------------------------------------------
+
+  tags = {
+    Environment = "dev"
+    Project     = "amazon-prime"
+  }
 }
